@@ -1,0 +1,6 @@
+Local fallback dictionary data is derived from ECDICT:
+https://github.com/skywind3000/ECDICT
+
+Copyright (c) 2022 Yan
+Licensed under the MIT License:
+https://opensource.org/licenses/MIT
