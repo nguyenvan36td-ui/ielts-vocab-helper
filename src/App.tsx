@@ -14,6 +14,7 @@ export default function App() {
   const [ready, setReady] = useState(false)
   const [tab, setTab] = useState<Tab>('add')
   const [refreshKey, setRefreshKey] = useState(0)
+  const [guest, setGuest] = useState(false)
   const bump = useCallback(() => setRefreshKey((k) => k + 1), [])
 
   useEffect(() => {
@@ -35,7 +36,17 @@ export default function App() {
     )
   }
 
-  if (!session) return <Auth />
+  if (!session && guest) {
+    return (
+      <div className="app">
+        <main>
+          <AddWord onSaved={bump} canSync={false} onRequestLogin={() => setGuest(false)} />
+        </main>
+      </div>
+    )
+  }
+
+  if (!session) return <Auth onGuest={() => setGuest(true)} />
 
   return (
     <div className="app">

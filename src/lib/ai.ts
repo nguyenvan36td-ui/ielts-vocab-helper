@@ -26,6 +26,7 @@ export async function generateMnemonic(word: string): Promise<AiResult> {
   if (!supabase) throw new Error('Supabase 未配置')
   const { data, error } = await supabase.functions.invoke('generate-mnemonic', {
     body: { word },
+    timeout: 12000,
   })
   if (error) throw new Error(error.message ?? 'AI 服务调用失败')
   const payload = data as { result?: AiResult; error?: string }

@@ -63,10 +63,14 @@ export default function WordCard({
         </div>
       )}
 
-      {row.ai_status !== 'done' && onRegen && (
+      {onRegen && (
         <button className="btn ghost" onClick={onRegen} disabled={busy}>
           <IconSparkle size={16} />
-          {busy ? 'AI 生成中…' : row.ai_status === 'error' ? '重新生成记忆法' : '生成记忆法'}
+          {busy
+            ? 'AI 生成中…'
+            : row.ai_status === 'none' || row.ai_status === 'pending'
+              ? '生成记忆法'
+              : '重新生成记忆法'}
         </button>
       )}
     </div>

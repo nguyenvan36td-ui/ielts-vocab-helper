@@ -2,7 +2,7 @@
 import { isSupabaseConfigured, supabase } from '../supabase'
 import { IconLock, IconMail } from './icons'
 
-export default function Auth() {
+export default function Auth({ onGuest }: { onGuest?: () => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -106,6 +106,11 @@ export default function Auth() {
         >
           {mode === 'login' ? '没有账号？注册一个' : '已有账号？去登录'}
         </button>
+        {onGuest && (
+          <button type="button" className="btn ghost block" onClick={onGuest}>
+            先查词（无需登录）
+          </button>
+        )}
       </form>
     </div>
   )

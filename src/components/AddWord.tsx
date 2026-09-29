@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { supabase } from '../supabase'
-import { lookupLemma, type LookupResult } from '../lib/lookup'
+import { lookupLemma, preloadLocalDictionary, type LookupResult } from '../lib/lookup'
 import { generateMnemonic, aiErrorText, type AiResult } from '../lib/ai'
 import type { WordRow } from '../types'
 import WordCard from './WordCard'
@@ -10,6 +10,46 @@ import { IconCheck, IconPlus, IconSearch } from './icons'
 async function fetchRow(id: string): Promise<WordRow> {
   const { data } = await supabase!.from('words').select('*').eq('id', id).single()
   return data as WordRow
+}
+
+async function fetchSavedWord(word: string, timeoutMs = 2200): Promise<WordRow | null> {
+  if (!supabase) return null
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const { data, error } = await supabase
+      .from('words')
+      .select('*')
+      .eq('word', word)
+      .abortSignal(controller.signal)
+      .maybeSingle()
+    if (error) throw error
+    return (data as WordRow | null) ?? null
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+async function fetchSavedWordList(): Promise<string[]> {
+  if (!supabase) return []
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 3500)
+  try {
+    const { data, error } = await supabase
+      .from('words')
+      .select('word')
+      .order('word')
+      .limit(500)
+      .abortSignal(controller.signal)
+    if (error) throw error
+    return (data ?? []).map((row) => row.word).filter(Boolean)
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+function wait(ms: number): Promise<null> {
+  return new Promise((resolve) => window.setTimeout(() => resolve(null), ms))
 }
 
 type AiStatus = 'idle' | 'pending' | 'done' | 'error'
@@ -38,7 +78,15 @@ function Chips({ label, items }: { label: string; items: string[] }) {
   )
 }
 
-export default function AddWord({ onSaved }: { onSaved: () => void }) {
+export default function AddWord({
+  onSaved,
+  canSync = true,
+  onRequestLogin,
+}: {
+  onSaved: () => void
+  canSync?: boolean
+  onRequestLogin?: () => void
+}) {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [aiBusy, setAiBusy] = useState(false)
@@ -54,11 +102,16 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
   const [userId, setUserId] = useState<string | null>(null)
   const [history, setHistory] = useState<string[]>([])
   const [focused, setFocused] = useState(false)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [activeSuggestion, setActiveSuggestion] = useState(-1)
+  const [savedWords, setSavedWords] = useState<string[]>([])
+  const searchRef = useRef(0)
 
   useEffect(() => {
-    if (!supabase) return
+    const client = supabase
+    if (!client) return
     let cancelled = false
-    supabase.auth.getUser().then(({ data }) => {
+    client.auth.getUser().then(({ data }) => {
       if (!cancelled) setUserId(data.user?.id ?? null)
     })
     return () => {
@@ -67,8 +120,44 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
   }, [])
 
   useEffect(() => {
+    void preloadLocalDictionary()
+  }, [])
+
+  useEffect(() => {
     setHistory(loadHistory(userId))
   }, [userId])
+
+  useEffect(() => {
+    if (!userId) return
+    let cancelled = false
+    fetchSavedWordList()
+      .then((words) => {
+        if (!cancelled) setSavedWords(words)
+      })
+      .catch(() => {
+        // 生词本不可用时仍可用本地历史和直连词典查词
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
+
+  useEffect(() => {
+    const term = input.trim().toLowerCase()
+    setActiveSuggestion(-1)
+    if (!focused || !term) {
+      setSuggestions([])
+      return
+    }
+    const merged = [
+      ...new Set([
+        ...savedWords.filter((word) => word.toLowerCase().startsWith(term)),
+        ...history.filter((word) => word.startsWith(term)),
+      ]),
+    ]
+    setSuggestions(merged.slice(0, 8))
+  }, [input, focused, history, savedWords])
+
 
   function reset() {
     setInput('')
@@ -81,9 +170,11 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
     setToast('')
     aiPromiseRef.current = null
     genRef.current++
+    searchRef.current++
   }
 
   function generateAi(word: string) {
+    if (!canSync) return
     const gen = ++genRef.current
     setAiStatus('pending')
     const p = generateMnemonic(word)
@@ -103,6 +194,7 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
   async function doSearch(raw: string) {
     const word = raw.trim().toLowerCase()
     if (!word || !supabase) return
+    const searchId = ++searchRef.current
     setError('')
     setToast('')
     setLookup(null)
@@ -113,43 +205,60 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
     aiPromiseRef.current = null
     genRef.current++
     setBusy(true)
+
+    const showExisting = (row: WordRow) => {
+      if (searchId !== searchRef.current) return false
+      searchRef.current++
+      genRef.current++
+      aiPromiseRef.current = null
+      setHistory(addHistory(userId, row.word))
+      setExisting(row)
+      setLookup(null)
+      setSaved(null)
+      setError('')
+      setBusy(false)
+      return true
+    }
+
+    const savedPromise = canSync ? fetchSavedWord(word).catch(() => null) : Promise.resolve(null)
+    void savedPromise.then((row) => {
+      if (row) showExisting(row)
+    })
+
     try {
-      // 先快速查生词本：直接输入原型时命中即显示，不额外查词典
-      const first = await supabase
-        .from('words')
-        .select('*')
-        .eq('word', word)
-        .maybeSingle()
-      if (first.data) {
-        setHistory(addHistory(userId, word))
-        setExisting(first.data as WordRow)
-        return
-      }
-      // 未命中才还原原型（went→go、inhabitants→inhabitant 等），再用原型查词/查重/生成助记
       const lk = await lookupLemma(word)
+      if (searchId !== searchRef.current) return
       const canonical = lk.word
-      setHistory(addHistory(userId, canonical))
-      const found =
-        canonical === word ? first : await supabase.from('words').select('*').eq('word', canonical).maybeSingle()
-      if (found.data) {
-        setExisting(found.data as WordRow)
-      } else {
-        generateAi(canonical)
-        setLookup(lk)
+      if (canSync && canonical !== word) {
+        void fetchSavedWord(canonical)
+          .then((row) => {
+            if (row) showExisting(row)
+          })
+          .catch(() => null)
       }
+
+      setHistory(addHistory(userId, canonical))
+      setLookup(lk)
+      generateAi(canonical)
       if (canonical !== word) {
         setInput(canonical)
         setToast(`已自动转为原型：${canonical}（输入：${word}）`)
       }
     } catch (err) {
-      // 查词失败时作废进行中的 AI 生成
+      if (searchId !== searchRef.current) return
+      const saved = await Promise.race([savedPromise, wait(1200)])
+      if (saved) {
+        showExisting(saved)
+        return
+      }
+      if (searchId !== searchRef.current) return
       genRef.current++
       aiPromiseRef.current = null
       setAi(null)
       setAiStatus('idle')
       setError(aiErrorText(err))
     } finally {
-      setBusy(false)
+      if (searchId === searchRef.current) setBusy(false)
     }
   }
 
@@ -160,6 +269,14 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
 
   function pickHistory(word: string) {
     setFocused(false)
+    setSuggestions([])
+    doSearch(word)
+  }
+
+  function pickSuggestion(word: string) {
+    setInput(word)
+    setFocused(false)
+    setSuggestions([])
     doSearch(word)
   }
 
@@ -169,20 +286,24 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
   }
 
   async function save(lk: LookupResult) {
-    if (!supabase) return
+    if (!canSync) {
+      onRequestLogin?.()
+      return
+    }
+    const client = supabase
+    if (!client) return
     setBusy(true)
     try {
       let aiNow = ai
-      if (aiPromiseRef.current) {
-        try {
-          aiNow = await aiPromiseRef.current
+      const aiWait = aiPromiseRef.current
+      if (!aiNow && aiWait) {
+        aiNow = await Promise.race([aiWait.catch(() => null), wait(4500)])
+        if (aiNow) {
           setAi(aiNow)
           setAiStatus('done')
-        } catch {
-          setAiStatus('error')
         }
       }
-      const { data, error: insertErr } = await supabase
+      const { data, error: insertErr } = await client
         .from('words')
         .insert({
           word: lk.word,
@@ -190,13 +311,13 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
           en_meaning: lk.enMeaning,
           example: lk.example,
           synonyms: lk.synonyms,
-          zh_meaning: aiNow?.zhMeaning || null,
+          zh_meaning: aiNow?.zhMeaning || lk.zhMeaning || null,
           root_analysis: aiNow?.rootAnalysis || null,
           mnemonic: aiNow?.mnemonic || null,
           word_family: aiNow?.wordFamily ?? [],
           ai_synonyms: aiNow?.synonyms ?? [],
           exam_hint: aiNow?.examHint || null,
-          ai_status: aiNow ? 'done' : 'error',
+          ai_status: aiNow ? 'done' : aiWait ? 'pending' : 'error',
         })
         .select()
         .single()
@@ -204,7 +325,38 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
       const row = data as WordRow
       onSaved()
       setSaved(row)
-      setToast(aiNow ? '已保存到生词本 ✓' : '已保存，但 AI 释义生成失败，可稍后重试')
+      setSavedWords((words) => [...new Set([lk.word, ...words])].sort())
+      setToast(aiNow ? '已保存到生词本 ✓' : aiWait ? '已保存，中文释义仍在生成' : '已保存，但 AI 释义生成失败，可稍后重试')
+
+      if (!aiNow && aiWait) {
+        const generation = genRef.current
+        void aiWait
+          .then(async (result) => {
+            const { data: updated, error: updateError } = await client
+              .from('words')
+              .update({
+                zh_meaning: result.zhMeaning || null,
+                root_analysis: result.rootAnalysis || null,
+                mnemonic: result.mnemonic || null,
+                word_family: result.wordFamily,
+                ai_synonyms: result.synonyms,
+                exam_hint: result.examHint || null,
+                ai_status: 'done',
+              })
+              .eq('id', row.id)
+              .select()
+              .single()
+            if (updateError) throw updateError
+            if (generation !== genRef.current) return
+            setAi(result)
+            setAiStatus('done')
+            setSaved(updated as WordRow)
+            setToast('已保存到生词本 ✓')
+          })
+          .catch(() => {
+            if (generation === genRef.current) setAiStatus('error')
+          })
+      }
     } catch (err) {
       setError(aiErrorText(err))
     } finally {
@@ -243,6 +395,9 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
   return (
     <div className="page">
       <h1 className="page-title">记词</h1>
+      {!canSync && (
+        <div className="alert info">免登录查词模式：可以立即查词，登录后才能保存和同步。</div>
+      )}
       <div className="search-box">
         <form className="search-bar" onSubmit={search}>
           <input
@@ -252,11 +407,20 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
               setFocused(true)
             }}
             onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
+            onBlur={() => window.setTimeout(() => setFocused(false), 120)}
             onKeyDown={(e) => {
               if (e.key === 'Escape') {
                 setFocused(false)
                 e.currentTarget.blur()
+              } else if (e.key === 'ArrowDown' && suggestions.length > 0) {
+                e.preventDefault()
+                setActiveSuggestion((index) => (index + 1) % suggestions.length)
+              } else if (e.key === 'ArrowUp' && suggestions.length > 0) {
+                e.preventDefault()
+                setActiveSuggestion((index) => (index <= 0 ? suggestions.length - 1 : index - 1))
+              } else if (e.key === 'Enter' && activeSuggestion >= 0) {
+                e.preventDefault()
+                pickSuggestion(suggestions[activeSuggestion])
               }
             }}
             placeholder="输入雅思生词，如 inhabitant"
@@ -268,25 +432,19 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
           </button>
         </form>
 
-        {focused && history.length > 0 && (
+        {focused && (suggestions.length > 0 || (!input.trim() && history.length > 0)) && (
           <div className="history-drop">
             <div className="history-head">
-              <span className="history-title">最近查询</span>
-              <button
-                className="history-clear"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={clearAll}
-              >
-                清空
-              </button>
+              <span className="history-title">{input.trim() ? '可能是' : '最近查询'}</span>
+              {!input.trim() && <button className="history-clear" onMouseDown={(e) => e.preventDefault()} onClick={clearAll}>清空</button>}
             </div>
             <ul className="history-list">
-              {history.slice(0, 5).map((w) => (
+              {(input.trim() ? suggestions : history.slice(0, 5)).map((w, index) => (
                 <li key={w}>
                   <button
-                    className="history-item"
+                    className={`history-item ${activeSuggestion === index ? 'active' : ''}`}
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => pickHistory(w)}
+                    onClick={() => (input.trim() ? pickSuggestion(w) : pickHistory(w))}
                   >
                     <IconSearch size={14} />
                     {w}
@@ -317,15 +475,25 @@ export default function AddWord({ onSaved }: { onSaved: () => void }) {
             </div>
           </div>
 
-          <button className="btn primary save-word-btn" disabled={busy} onClick={() => save(lookup)}>
+          <button
+            className="btn primary save-word-btn"
+            disabled={canSync && busy}
+            onClick={() => (canSync ? void save(lookup) : onRequestLogin?.())}
+          >
             <IconCheck size={18} />
-            {busy ? '保存中…' : '保存到生词本'}
+            {!canSync ? '登录后保存' : busy ? '保存中…' : '保存到生词本'}
           </button>
 
           {aiStatus === 'pending' && (
             <div className="sec">
+              <div className="sec-label">AI 助记</div>
+              <p className="muted">AI 正在补充释义和记忆法…</p>
+            </div>
+          )}
+          {lookup.zhMeaning && !ai && (
+            <div className="sec">
               <div className="sec-label">中文释义</div>
-              <p className="muted">AI 正在生成中文释义…</p>
+              <p className="zh">{lookup.zhMeaning}</p>
             </div>
           )}
           {ai && (

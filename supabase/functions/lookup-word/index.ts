@@ -82,12 +82,16 @@ async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
   }
 }
 
-// 主源：dictionaryapi.dev（数据全：音标/释义/例句/同义词），偶尔 502/限流
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+// 主源：dictionaryapi.dev（数据全：音标/释义/例句/同义词），偶尔 502/限流/超时
 async function lookupDictApi(word: string): Promise<DictOutcome> {
   const url = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetchWithTimeout(url, 8000)
+      const res = await fetchWithTimeout(url, 4000)
       if (res.ok) {
         const entries = (await res.json()) as DictEntry[]
         const entry = entries?.[0]
@@ -112,9 +116,9 @@ async function lookupDictApi(word: string): Promise<DictOutcome> {
         }
       }
       if (res.status === 404) return { kind: 'notfound' }
-      if (attempt === 0) await new Promise((r) => setTimeout(r, 600))
+      if (attempt === 0) await sleep(300)
     } catch {
-      if (attempt === 0) await new Promise((r) => setTimeout(r, 400))
+      if (attempt === 0) await sleep(200)
     }
   }
   return { kind: 'error' }
@@ -136,7 +140,7 @@ function parseDatamuseDef(def: string): { pos: string; text: string } | null {
 async function lookupDatamuse(word: string): Promise<DictOutcome> {
   const url = `https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&md=d&max=5`
   try {
-    const res = await fetchWithTimeout(url, 6000)
+    const res = await fetchWithTimeout(url, 3500)
     if (!res.ok) return { kind: 'error' }
     const items = (await res.json()) as DatamuseItem[]
     const item = items.find((i) => (i.word ?? '').toLowerCase() === word && (i.defs?.length ?? 0) > 0)
@@ -175,18 +179,29 @@ Deno.serve(async (req) => {
     const cached = cacheGet(w)
     if (cached) return json({ result: cached })
 
-    const [dictApi, datamuse] = await Promise.all([lookupDictApi(w), lookupDatamuse(w)])
+    // 主源和备用源并行发起。主源最多等 3.5 秒，
+    // 超时/失败时立刻改用备用源，避免用户干等十几秒
+    const dictP = lookupDictApi(w)
+    const datP = lookupDatamuse(w)
 
-    if (dictApi.kind === 'ok') {
-      cacheSet(w, dictApi.result)
-      return json({ result: dictApi.result })
+    const dict = await Promise.race([dictP, sleep(3500).then(() => null)])
+    if (dict && dict.kind === 'ok') {
+      cacheSet(w, dict.result)
+      return json({ result: dict.result })
     }
-    if (datamuse.kind === 'ok') {
-      cacheSet(w, datamuse.result)
-      return json({ result: datamuse.result })
+
+    const dat = await Promise.race([datP, sleep(3000).then(() => null)])
+    if (dat && dat.kind === 'ok') {
+      cacheSet(w, dat.result)
+      return json({ result: dat.result })
     }
+
     // 两个源都明确查无此词
-    if (dictApi.kind === 'notfound' && datamuse.kind === 'notfound') {
+    if (dict?.kind === 'notfound' && dat?.kind === 'notfound') {
+      return json({ error: `词典中未找到 "${w}"，请检查拼写` })
+    }
+    // 主源明确查无此词、备用源也没给出结果 → 大概率是真没有
+    if (dict?.kind === 'notfound' && (dat === null || dat.kind === 'error')) {
       return json({ error: `词典中未找到 "${w}"，请检查拼写` })
     }
     // 至少一个源是网络/服务异常

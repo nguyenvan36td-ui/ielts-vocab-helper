@@ -223,7 +223,7 @@ h3 { font-size: 16px; }
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 .history-item svg { color: var(--faint); flex-shrink: 0; }
-.history-item:hover { background: var(--primary-soft); color: var(--primary-deep); }
+.history-item:hover, .history-item.active { background: var(--primary-soft); color: var(--primary-deep); }
 .history-item:active { transform: scale(0.99); }
 
 /* ============ 按钮 ============ */

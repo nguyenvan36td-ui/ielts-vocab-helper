@@ -36,7 +36,7 @@ export default function Settings({ email }: { email: string }) {
       <div className="card">
         <SettingHead icon={<IconSparkle size={19} />} title="AI 记忆法说明" />
         <p className="small">
-          中文释义、词根词缀、谐音/联想记忆法由 DeepSeek AI 生成，key 保存在服务端
+          中文释义、词根词缀/词源、联想记忆法由 DeepSeek AI 生成，key 保存在服务端
           （Supabase Edge Function 环境变量 <code>DEEPSEEK_API_KEY</code>），不会出现在网页代码中。
         </p>
         <p className="small">同一个词只生成一次并缓存，重复添加不会重复扣费。</p>
